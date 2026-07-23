@@ -32,7 +32,11 @@ MOCK_PLANS = [
 
 
 def after_install():
-	seed_plans()
+	# DocTypes may not be queryable mid-install on some benches; migrate re-seeds.
+	try:
+		seed_plans()
+	except Exception:
+		frappe.log_error(title="zatgo_space after_install seed_plans")
 
 
 def after_migrate():
@@ -40,6 +44,8 @@ def after_migrate():
 
 
 def seed_plans():
+	if not frappe.db.exists("DocType", "Space Plan"):
+		return
 	for plan in MOCK_PLANS:
 		if frappe.db.exists("Space Plan", plan["code"]):
 			doc = frappe.get_doc("Space Plan", plan["code"])

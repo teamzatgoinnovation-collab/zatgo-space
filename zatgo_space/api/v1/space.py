@@ -40,6 +40,15 @@ DEFAULT_APPS = [
 	{"package": "hrms", "title": "HRMS", "required": False},
 ]
 
+APP_TITLE_OVERRIDES = {
+	"frappe": "Frappe Framework",
+	"erpnext": "ERPNext",
+	"hrms": "HRMS",
+	"zatgo_core": "ZatGo Core",
+	"zatgo_space": "ZatGo Space",
+	"chat_ai": "Chat AI",
+}
+
 # Statuses that count toward soft pool allocation
 POOL_STATUSES = ("Draft", "Provisioning", "Active")
 
@@ -54,6 +63,62 @@ def _parse_features(raw: str | None) -> list[str]:
 	except Exception:
 		pass
 	return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+def _app_title(package: str) -> str:
+	if package in APP_TITLE_OVERRIDES:
+		return APP_TITLE_OVERRIDES[package]
+	try:
+		mod = frappe.get_module(f"{package}.hooks")
+		title = getattr(mod, "app_title", None)
+		if title:
+			return str(title)
+	except Exception:
+		pass
+	return package.replace("_", " ").title()
+
+
+def _list_bench_apps() -> list[dict[str, Any]]:
+	"""Apps available on this Docker bench (from get-app / apps/), not a hardcode."""
+	packages: list[str] = []
+	try:
+		packages = [p for p in frappe.get_all_apps(with_internal_apps=False) if p]
+	except Exception:
+		packages = []
+
+	if not packages:
+		# Fallback: scan apps directory on the bench
+		import os
+
+		try:
+			from frappe.utils import get_bench_path
+
+			apps_dir = os.path.join(get_bench_path(), "apps")
+			if os.path.isdir(apps_dir):
+				for name in sorted(os.listdir(apps_dir)):
+					path = os.path.join(apps_dir, name)
+					if os.path.isdir(path) and re.match(r"^[a-z][a-z0-9_]*$", name):
+						packages.append(name)
+		except Exception:
+			pass
+
+	if not packages:
+		return list(DEFAULT_APPS)
+
+	# Stable order: frappe → erpnext → rest A–Z
+	priority = {"frappe": 0, "erpnext": 1}
+	packages = sorted(set(packages), key=lambda p: (priority.get(p, 50), p))
+
+	apps = []
+	for pkg in packages:
+		apps.append(
+			{
+				"package": pkg,
+				"title": _app_title(pkg),
+				"required": pkg == "frappe",
+			}
+		)
+	return apps
 
 
 def _assert_internal_token():
@@ -204,7 +269,7 @@ def list_catalog():
 	return ok(
 		{
 			"domainSuffix": suffix,
-			"apps": DEFAULT_APPS,
+			"apps": _list_bench_apps(),
 			"plans": plans,
 			"pool": {
 				"ramPoolMb": pool["ramPoolMb"],

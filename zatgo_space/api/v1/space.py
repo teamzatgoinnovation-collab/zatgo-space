@@ -97,7 +97,6 @@ def list_catalog():
 			"domainSuffix": suffix,
 			"apps": DEFAULT_APPS,
 			"plans": plans,
-			"inviteRequired": bool(frappe.conf.get("space_invite_code")),
 		}
 	)
 
@@ -108,13 +107,8 @@ def create_order(
 	plan: str,
 	apps: str | list | None = None,
 	payment_method: str = "Mock",
-	invite_code: str | None = None,
 ):
 	"""Create a Draft Space Order (no admin password stored)."""
-	expected_invite = frappe.conf.get("space_invite_code") or ""
-	if expected_invite and (invite_code or "") != expected_invite:
-		return fail("INVITE_REQUIRED", "Valid invite code required")
-
 	slug = (slug or "").strip().lower()
 	if not SLUG_RE.match(slug):
 		return fail("INVALID_SLUG", "Invalid subdomain slug")

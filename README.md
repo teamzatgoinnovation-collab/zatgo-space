@@ -33,8 +33,7 @@ ERPNext custom application (`zatgo_space`) — control-plane DocTypes and APIs f
 ```json
 {
   "space_domain_suffix": "zatgo.online",
-  "space_internal_token": "<random>",
-  "space_invite_code": "<optional gate>"
+  "space_internal_token": "<random>"
 }
 ```
 

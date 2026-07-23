@@ -18,7 +18,11 @@
   "job_id",
   "desk_url",
   "error_message",
-  "admin_password_set"
+  "admin_password_set",
+  "section_usage",
+  "ram_used_mb",
+  "disk_used_mb",
+  "usage_updated_at"
  ],
  "fields": [
   {
@@ -110,10 +114,37 @@
    "fieldtype": "Check",
    "label": "Admin Password Set",
    "read_only": 1
+  },
+  {
+   "fieldname": "section_usage",
+   "fieldtype": "Section Break",
+   "label": "Usage Snapshot"
+  },
+  {
+   "default": "0",
+   "fieldname": "ram_used_mb",
+   "fieldtype": "Int",
+   "label": "RAM Used (MB)",
+   "non_negative": 1,
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "disk_used_mb",
+   "fieldtype": "Int",
+   "label": "Disk Used (MB)",
+   "non_negative": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "usage_updated_at",
+   "fieldtype": "Datetime",
+   "label": "Usage Updated At",
+   "read_only": 1
   }
  ],
  "links": [],
- "modified": "2026-07-23 00:00:00.000000",
+ "modified": "2026-07-24 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "ZatGo Space",
  "name": "Space Order",

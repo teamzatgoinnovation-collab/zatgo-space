@@ -8,8 +8,10 @@ from typing import Any
 
 import frappe
 from frappe import _
+from frappe.utils import now_datetime
 
 from zatgo_space.api.response import fail, ok
+from zatgo_space.install import DEFAULT_DISK_POOL_MB, DEFAULT_RAM_POOL_MB, MOCK_PLANS
 
 DOMAIN_SUFFIX = "zatgo.online"
 SLUG_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
@@ -38,6 +40,9 @@ DEFAULT_APPS = [
 	{"package": "hrms", "title": "HRMS", "required": False},
 ]
 
+# Statuses that count toward soft pool allocation
+POOL_STATUSES = ("Draft", "Provisioning", "Active")
+
 
 def _parse_features(raw: str | None) -> list[str]:
 	if not raw:
@@ -58,6 +63,125 @@ def _assert_internal_token():
 		frappe.throw(_("Invalid space internal token"), frappe.PermissionError)
 
 
+def _pool_limits() -> tuple[int, int]:
+	"""Return (ram_pool_mb, disk_pool_mb) from Space Settings or site_config fallbacks."""
+	ram = DEFAULT_RAM_POOL_MB
+	disk = DEFAULT_DISK_POOL_MB
+	if frappe.db.exists("DocType", "Space Settings"):
+		try:
+			settings = frappe.get_single("Space Settings")
+			if settings.ram_pool_mb:
+				ram = int(settings.ram_pool_mb)
+			if settings.disk_pool_mb:
+				disk = int(settings.disk_pool_mb)
+		except Exception:
+			pass
+	# site_config overrides (optional ops knobs)
+	if frappe.conf.get("space_ram_pool_mb"):
+		ram = int(frappe.conf.get("space_ram_pool_mb"))
+	if frappe.conf.get("space_disk_pool_mb"):
+		disk = int(frappe.conf.get("space_disk_pool_mb"))
+	return ram, disk
+
+
+def _plan_quotas(plan_code: str) -> tuple[int, int]:
+	"""Return (ram_limit_mb, disk_limit_mb) for a plan code."""
+	if frappe.db.exists("Space Plan", plan_code):
+		row = frappe.db.get_value(
+			"Space Plan",
+			plan_code,
+			["ram_limit_mb", "disk_limit_mb"],
+			as_dict=True,
+		)
+		if row:
+			return int(row.ram_limit_mb or 0), int(row.disk_limit_mb or 0)
+	for p in MOCK_PLANS:
+		if p["code"] == plan_code:
+			return int(p["ram_limit_mb"]), int(p["disk_limit_mb"])
+	return 0, 0
+
+
+def _allocated_pool(exclude_order: str | None = None) -> dict[str, Any]:
+	"""Sum soft RAM/disk for Draft + Provisioning + Active orders."""
+	ram_pool, disk_pool = _pool_limits()
+	allocated_ram = 0
+	allocated_disk = 0
+	used_ram = 0
+	used_disk = 0
+	count = 0
+
+	if not frappe.db.exists("DocType", "Space Order"):
+		return {
+			"ramPoolMb": ram_pool,
+			"diskPoolMb": disk_pool,
+			"allocatedRamMb": 0,
+			"allocatedDiskMb": 0,
+			"usedRamMb": 0,
+			"usedDiskMb": 0,
+			"freeRamMb": ram_pool,
+			"freeDiskMb": disk_pool,
+			"siteCount": 0,
+		}
+
+	filters: dict[str, Any] = {"status": ["in", list(POOL_STATUSES)]}
+	orders = frappe.get_all(
+		"Space Order",
+		filters=filters,
+		fields=["name", "plan", "ram_used_mb", "disk_used_mb", "status"],
+	)
+	for order in orders:
+		if exclude_order and order.name == exclude_order:
+			continue
+		plan_ram, plan_disk = _plan_quotas(order.plan)
+		allocated_ram += plan_ram
+		allocated_disk += plan_disk
+		used_ram += int(order.ram_used_mb or 0)
+		used_disk += int(order.disk_used_mb or 0)
+		count += 1
+
+	return {
+		"ramPoolMb": ram_pool,
+		"diskPoolMb": disk_pool,
+		"allocatedRamMb": allocated_ram,
+		"allocatedDiskMb": allocated_disk,
+		"usedRamMb": used_ram,
+		"usedDiskMb": used_disk,
+		"freeRamMb": max(0, ram_pool - allocated_ram),
+		"freeDiskMb": max(0, disk_pool - allocated_disk),
+		"siteCount": count,
+	}
+
+
+def _serialize_plan(row_or_dict) -> dict[str, Any]:
+	if isinstance(row_or_dict, dict):
+		code = row_or_dict.get("code")
+		title = row_or_dict.get("title")
+		mock_price = row_or_dict.get("mock_price")
+		features = row_or_dict.get("features")
+		ram = int(row_or_dict.get("ram_limit_mb") or 0)
+		disk = int(row_or_dict.get("disk_limit_mb") or 0)
+		if isinstance(features, list):
+			feat_list = [str(x) for x in features]
+		else:
+			feat_list = _parse_features(features)
+	else:
+		code = row_or_dict.code
+		title = row_or_dict.title
+		mock_price = row_or_dict.mock_price
+		feat_list = _parse_features(row_or_dict.features)
+		ram = int(getattr(row_or_dict, "ram_limit_mb", 0) or 0)
+		disk = int(getattr(row_or_dict, "disk_limit_mb", 0) or 0)
+
+	return {
+		"code": code,
+		"title": title,
+		"mock_price": mock_price,
+		"features": feat_list,
+		"ramLimitMb": ram,
+		"diskLimitMb": disk,
+	}
+
+
 @frappe.whitelist(allow_guest=True)
 def list_catalog():
 	"""Plans + installable app catalog for the Space wizard."""
@@ -66,39 +190,81 @@ def list_catalog():
 		rows = frappe.get_all(
 			"Space Plan",
 			filters={"is_active": 1},
-			fields=["code", "title", "mock_price", "features", "sort_order"],
+			fields=["code", "title", "mock_price", "features", "sort_order", "ram_limit_mb", "disk_limit_mb"],
 			order_by="sort_order asc",
 		)
 		for row in rows:
-			plans.append(
-				{
-					"code": row.code,
-					"title": row.title,
-					"mock_price": row.mock_price,
-					"features": _parse_features(row.features),
-				}
-			)
+			plans.append(_serialize_plan(row))
 	else:
-		from zatgo_space.install import MOCK_PLANS
-
 		for p in MOCK_PLANS:
-			plans.append(
-				{
-					"code": p["code"],
-					"title": p["title"],
-					"mock_price": p["mock_price"],
-					"features": p["features"],
-				}
-			)
+			plans.append(_serialize_plan(p))
 
 	suffix = frappe.conf.get("space_domain_suffix") or DOMAIN_SUFFIX
+	pool = _allocated_pool()
 	return ok(
 		{
 			"domainSuffix": suffix,
 			"apps": DEFAULT_APPS,
 			"plans": plans,
+			"pool": {
+				"ramPoolMb": pool["ramPoolMb"],
+				"diskPoolMb": pool["diskPoolMb"],
+				"allocatedRamMb": pool["allocatedRamMb"],
+				"allocatedDiskMb": pool["allocatedDiskMb"],
+				"freeRamMb": pool["freeRamMb"],
+				"freeDiskMb": pool["freeDiskMb"],
+				"siteCount": pool["siteCount"],
+			},
 		}
 	)
+
+
+@frappe.whitelist(allow_guest=True)
+def list_sites_usage():
+	"""Active/provisioning sites with soft quotas and last usage snapshot."""
+	pool = _allocated_pool()
+	sites = []
+
+	if frappe.db.exists("DocType", "Space Order"):
+		orders = frappe.get_all(
+			"Space Order",
+			filters={"status": ["in", ["Provisioning", "Active"]]},
+			fields=[
+				"name",
+				"slug",
+				"hostname",
+				"status",
+				"plan",
+				"desk_url",
+				"ram_used_mb",
+				"disk_used_mb",
+				"usage_updated_at",
+			],
+			order_by="creation asc",
+		)
+		for order in orders:
+			ram_limit, disk_limit = _plan_quotas(order.plan)
+			plan_title = order.plan
+			if frappe.db.exists("Space Plan", order.plan):
+				plan_title = frappe.db.get_value("Space Plan", order.plan, "title") or order.plan
+			sites.append(
+				{
+					"name": order.name,
+					"slug": order.slug,
+					"hostname": order.hostname,
+					"status": order.status,
+					"plan": order.plan,
+					"planTitle": plan_title,
+					"deskUrl": order.desk_url,
+					"ramLimitMb": ram_limit,
+					"diskLimitMb": disk_limit,
+					"ramUsedMb": int(order.ram_used_mb or 0),
+					"diskUsedMb": int(order.disk_used_mb or 0),
+					"usageUpdatedAt": str(order.usage_updated_at) if order.usage_updated_at else None,
+				}
+			)
+
+	return ok({"pool": pool, "sites": sites})
 
 
 @frappe.whitelist(allow_guest=True)
@@ -123,6 +289,21 @@ def create_order(
 
 	if not frappe.db.exists("Space Plan", plan):
 		return fail("INVALID_PLAN", f"Unknown plan: {plan}")
+
+	new_ram, new_disk = _plan_quotas(plan)
+	pool = _allocated_pool()
+	if pool["allocatedRamMb"] + new_ram > pool["ramPoolMb"]:
+		return fail(
+			"POOL_RAM_EXCEEDED",
+			f"Not enough RAM in the server pool "
+			f"({pool['allocatedRamMb']} + {new_ram} MB needed, {pool['ramPoolMb']} MB total).",
+		)
+	if pool["allocatedDiskMb"] + new_disk > pool["diskPoolMb"]:
+		return fail(
+			"POOL_DISK_EXCEEDED",
+			f"Not enough disk in the server pool "
+			f"({pool['allocatedDiskMb']} + {new_disk} MB needed, {pool['diskPoolMb']} MB total).",
+		)
 
 	app_list: list[Any] = []
 	if isinstance(apps, str):
@@ -173,6 +354,8 @@ def create_order(
 			"status": doc.status,
 			"deskUrl": doc.desk_url,
 			"plan": doc.plan,
+			"ramLimitMb": new_ram,
+			"diskLimitMb": new_disk,
 			"apps": [{"package": r.app_package, "title": r.title} for r in doc.apps],
 		}
 	)
@@ -203,6 +386,7 @@ def get_order(name: str | None = None, job_id: str | None = None):
 			limit_page_length=100,
 		)
 
+	ram_limit, disk_limit = _plan_quotas(doc.plan)
 	return ok(
 		{
 			"name": doc.name,
@@ -213,6 +397,10 @@ def get_order(name: str | None = None, job_id: str | None = None):
 			"plan": doc.plan,
 			"jobId": doc.job_id,
 			"error": doc.error_message,
+			"ramLimitMb": ram_limit,
+			"diskLimitMb": disk_limit,
+			"ramUsedMb": int(doc.ram_used_mb or 0),
+			"diskUsedMb": int(doc.disk_used_mb or 0),
 			"apps": [{"package": r.app_package, "title": r.title} for r in doc.apps],
 			"logs": logs,
 		}
@@ -263,3 +451,35 @@ def update_order_status(
 
 	frappe.db.commit()
 	return ok({"name": doc.name, "status": doc.status})
+
+
+@frappe.whitelist()
+def update_order_usage(
+	name: str,
+	ram_used_mb: int | float | None = None,
+	disk_used_mb: int | float | None = None,
+):
+	"""Provisioner/metrics callback — store soft usage snapshot on Space Order."""
+	_assert_internal_token()
+
+	if not frappe.db.exists("Space Order", name):
+		return fail("NOT_FOUND", "Space Order not found")
+
+	doc = frappe.get_doc("Space Order", name)
+	if ram_used_mb is not None:
+		doc.ram_used_mb = max(0, int(ram_used_mb))
+	if disk_used_mb is not None:
+		doc.disk_used_mb = max(0, int(disk_used_mb))
+	doc.usage_updated_at = now_datetime()
+	doc.flags.ignore_permissions = True
+	doc.save(ignore_permissions=True)
+	frappe.db.commit()
+
+	return ok(
+		{
+			"name": doc.name,
+			"ramUsedMb": int(doc.ram_used_mb or 0),
+			"diskUsedMb": int(doc.disk_used_mb or 0),
+			"usageUpdatedAt": str(doc.usage_updated_at),
+		}
+	)

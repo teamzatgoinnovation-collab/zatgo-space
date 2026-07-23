@@ -1,0 +1,3 @@
+recursive-include zatgo_space/templates *
+recursive-include zatgo_space/public *
+recursive-include zatgo_space/fixtures *

@@ -1,3 +1,5 @@
+> **Archived — merged into [zatgo-core](https://github.com/teamzatgoinnovation-collab/zatgo-core)** (commit 052cf20, 2026-10-08). This code now lives in `zatgo_core/zatgo_space/` and is switched on per site in ZG System Settings → Bundled Apps. Don't develop here.
+
 # ZatGo Space
 
 ERPNext custom application (`zatgo_space`) — control-plane DocTypes and APIs for **ZatGo Space** self-serve site provisioning on `*.zatgo.online`.
